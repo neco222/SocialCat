@@ -8,18 +8,34 @@
   ],
   "host_permissions": [
     "https://x.com/*",
-    "https://twitter.com/*"
+    "https://twitter.com/*",
+    "https://web.social-dog.net/*",
+    "https://cdn.syndication.twimg.com/*"
   ],
   "content_scripts": [
     {
       "matches": [
         "https://x.com/*",
-        "https://twitter.com/*"
+        "https://twitter.com/*",
+        "https://web.social-dog.net/*"
       ],
       "js": [
         "content.js"
       ],
       "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "socialdog-injected.js"
+      ],
+      "matches": [
+        "https://web.social-dog.net/*"
+      ]
     }
   ],
   "icons": {

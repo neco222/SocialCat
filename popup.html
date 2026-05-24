@@ -1,32 +1,35 @@
 <!doctype html>
 <html lang="ja">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SocialCat</title>
-    <link rel="stylesheet" href="popup.css">
-  </head>
-  <body>
-    <main class="popup">
-      <header class="head">
-        <h1>SocialCat</h1>
-        <p>Twitter / X を使いやすく</p>
-      </header>
 
-      <section class="toggles">
-        <label><input id="enableReplyEnterSend" type="checkbox">返信 Enter 送信</label>
-        <label><input id="enablePostEnterSend" type="checkbox">投稿 Enter 送信</label>
-        <label><input id="autoOpenReplyAfterLike" type="checkbox">いいね後にリプ欄を開く</label>
-        <label><input id="collapseRetweets" type="checkbox">リポストを折りたたむ</label>
-        <label><input id="autoLikeOnReply" type="checkbox">リプ送信時に自動いいね</label>
-        <label><input id="greetingEnabled" type="checkbox">時間帯あいさつ挿入</label>
-      </section>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SocialCat</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
 
-      <footer class="foot">
-        <button id="openOptions" type="button">時間帯・メッセージ詳細設定</button>
-        <p id="status" aria-live="polite"></p>
-      </footer>
-    </main>
-    <script src="popup.js"></script>
-  </body>
+<body>
+  <main class="popup">
+    <header class="head glass-panel">
+      <h1>SocialCat</h1>
+      <p>Twitter / X を使いやすく</p>
+    </header>
+
+    <section class="toggles glass-panel">
+      <label>返信 Enter 送信<input id="enableReplyEnterSend" type="checkbox"></label>
+      <label>投稿 Enter 送信<input id="enablePostEnterSend" type="checkbox"></label>
+      <label>いいね後にリプ欄を開く<input id="autoOpenReplyAfterLike" type="checkbox"></label>
+      <label>リポストを折りたたむ<input id="collapseRetweets" type="checkbox"></label>
+      <label>リプ送信時に自動いいね<input id="autoLikeOnReply" type="checkbox"></label>
+      <label>時間帯あいさつ挿入<input id="greetingEnabled" type="checkbox"></label>
+    </section>
+
+    <footer class="foot">
+      <button id="openOptions" type="button" class="glass-button">時間帯・メッセージ詳細設定</button>
+      <p id="status" aria-live="polite"></p>
+    </footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+
 </html>

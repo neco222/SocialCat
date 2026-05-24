@@ -22,9 +22,34 @@
   const LIKE_BUTTON_SELECTOR = 'button[data-testid="like"]';
   const TWEET_ARTICLE_SELECTOR = 'article[data-testid="tweet"]';
   const RETWEET_CONTEXT_SELECTOR = '[data-testid="socialContext"]';
+  const SOCIAL_DOG_HOST = "web.social-dog.net";
+  const SOCIAL_DOG_API_EVENT = "socialcat:socialdog-api";
+  const SOCIAL_DOG_USERS_API_PATH = "/user_list/api_get_users";
+  const SOCIAL_DOG_MENTIONS_API_PATH = "/user_list/api_get_mentions";
+  const SOCIAL_DOG_NOTICE_ATTRIBUTE = "data-socialcat-reply-notice";
+  const X_REPLY_NOTICE_ATTRIBUTE = "data-socialcat-x-reply-notice";
+  const X_REPLY_NOTICE_KIND_ATTRIBUTE = "data-socialcat-x-reply-kind";
+  const X_REPLY_NOTICE_CLASS = "socialcat-x-reply-notice";
+  const X_REPLY_NOTICE_STYLE_ID = "socialcat-x-reply-notice-style";
+  const X_NOTIFICATION_CELL_SELECTOR = 'div[data-testid="cellInnerDiv"]';
+  const X_NOTIFICATION_ARTICLE_SELECTOR = 'article[data-testid="notification"]';
+  const X_REPLYING_TO_PATTERN = /(\u8fd4\u4fe1\u5148:|replying to)/i;
+  const X_TWEET_RESULT_BASE = "https://cdn.syndication.twimg.com/tweet-result";
+  const X_REPLY_TO_REPLY_PATTERN =
+    /(replied to your reply|your reply.*replied|\u3042\u306a\u305f\u306e(?:\u8fd4\u4fe1|\u30ea\u30d7(?:\u30e9\u30a4)?).{0,6}\u8fd4\u4fe1\u3057\u307e\u3057\u305f|\u8fd4\u4fe1\u306b\u8fd4\u4fe1)/i;
+  const X_REPLY_TO_POST_PATTERN =
+    /(replied to your post|replied to you|replied\b.*\byou\b|\u3042\u306a\u305f\u306e(?:\u30dd\u30b9\u30c8|\u30c4\u30a4\u30fc\u30c8).{0,6}\u8fd4\u4fe1\u3057\u307e\u3057\u305f|\u3042\u306a\u305f\u306b\u8fd4\u4fe1\u3057\u307e\u3057\u305f)/i;
+  const X_REPLY_VERB_PATTERN = /(\u8fd4\u4fe1\u3057\u307e\u3057\u305f|replied)/i;
+  const X_NON_REPLY_ACTION_PATTERN =
+    /(\u3044\u3044\u306d\u3057\u307e\u3057\u305f|\u30ea\u30dd\u30b9\u30c8\u3057\u307e\u3057\u305f|\u30d5\u30a9\u30ed\u30fc\u3055\u308c\u307e\u3057\u305f|liked|reposted|followed)/i;
 
   const AUTO_INSERT_DATA_KEY = "socialcatGreetingInserted";
   const AUTO_INSERT_VALUE_KEY = "socialcatGreetingValue";
+  const GREETING_HIGHLIGHT_CLASS = "socialcat-greeting-highlight";
+  const GREETING_STYLE_ID = "socialcat-greeting-style";
+  const MORNING_START_MINUTES = 4 * 60;
+  const MORNING_END_MINUTES = 12 * 60;
+  const OHATSU_TEXT_PATTERN = /(\u304a\u306f|\u304a\u65e9\u3046|good\s*morning|\bgm\b)/i;
   const RETWEET_ID_ATTRIBUTE = "data-socialcat-retweet-id";
   const RETWEET_KEY_ATTRIBUTE = "data-socialcat-retweet-key";
   const RETWEET_EXPANDED_ATTRIBUTE = "data-socialcat-retweet-expanded";
@@ -98,14 +123,37 @@
   let routeWatcherInstalled = false;
   const expandedRetweetKeys = new Set();
   const recentExpandedRetweetKeys = new Map();
+  const socialDogReplyInfoByTweetId = new Map();
+  const socialDogParentOwnerByTweetId = new Map();
+  const socialDogParentLookupPending = new Set();
+  const socialDogOwnHandleCounts = new Map();
+  const socialDogMentionFromMeTweetIds = new Set();
+  let socialDogTimelineObserver = null;
+  let socialDogNoticeTimer = null;
+  let socialDogParentLookupRunning = false;
+  let socialDogOwnServiceUserId = "";
+  let socialDogOwnScreenName = "";
+  let xReplyNoticeObserver = null;
+  let xReplyNoticeTimer = null;
+  const xReplyKindByTweetId = new Map();
+  const xReplyLookupPending = new Set();
+  let xReplyLookupRunning = false;
+  let routeWatchFallbackTimer = null;
 
   init();
 
   async function init() {
+    if (isSocialDogPage()) {
+      initSocialDog();
+      return;
+    }
+
     settings = await loadSettings();
     lastRouteKey = getRouteKey();
     installRouteWatcher();
     applyRetweetCollapse();
+    applyXReplyNotices();
+    ensureGreetingStyles();
 
     document.addEventListener("keydown", onKeyDown, true);
     document.addEventListener("beforeinput", onBeforeInput, true);
@@ -113,6 +161,505 @@
     document.addEventListener("click", onClick, true);
 
     chrome.storage.onChanged.addListener(onStorageChanged);
+  }
+
+  function isSocialDogPage() {
+    return location.hostname.toLowerCase() === SOCIAL_DOG_HOST;
+  }
+
+  function initSocialDog() {
+    injectSocialDogBridgeScript();
+    window.addEventListener(SOCIAL_DOG_API_EVENT, onSocialDogApiEvent, true);
+    observeSocialDogTimeline();
+    scheduleSocialDogNoticeUpdate();
+  }
+
+  function injectSocialDogBridgeScript() {
+    const scriptId = "socialcat-socialdog-bridge";
+    if (document.getElementById(scriptId)) {
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.id = scriptId;
+    script.src = chrome.runtime.getURL("socialdog-injected.js");
+    script.async = false;
+    const target = document.head || document.documentElement;
+    if (!target) {
+      return;
+    }
+    script.addEventListener(
+      "load",
+      () => {
+        script.remove();
+      },
+      { once: true }
+    );
+    script.addEventListener(
+      "error",
+      () => {
+        script.remove();
+      },
+      { once: true }
+    );
+    target.appendChild(script);
+  }
+
+  function onSocialDogApiEvent(event) {
+    const detail = event && event.detail;
+    if (!detail || typeof detail !== "object") {
+      return;
+    }
+
+    const url = typeof detail.url === "string" ? detail.url : "";
+    if (!isSocialDogApiUrl(url)) {
+      return;
+    }
+
+    const payload = detail.payload;
+    if (!payload || typeof payload !== "object") {
+      return;
+    }
+
+    handleSocialDogApiPayload(url, payload);
+  }
+
+  function isSocialDogApiUrl(url) {
+    const pathname = getPathnameFromUrl(url);
+    if (pathname) {
+      return pathname === SOCIAL_DOG_USERS_API_PATH || pathname === SOCIAL_DOG_MENTIONS_API_PATH;
+    }
+    return url.includes(SOCIAL_DOG_USERS_API_PATH) || url.includes(SOCIAL_DOG_MENTIONS_API_PATH);
+  }
+
+  function getPathnameFromUrl(url) {
+    try {
+      return new URL(url, location.href).pathname;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function handleSocialDogApiPayload(url, payload) {
+    const pathname = getPathnameFromUrl(url);
+    let updated = false;
+
+    if (updateSocialDogOwnUserFromUrl(url)) {
+      updated = true;
+    }
+
+    if (pathname === SOCIAL_DOG_USERS_API_PATH) {
+      updated = updateSocialDogUsersFromPayload(payload) || updated;
+    }
+    if (pathname === SOCIAL_DOG_MENTIONS_API_PATH) {
+      updated = updateSocialDogMentionsFromPayload(payload) || updated;
+    }
+
+    if (updated) {
+      scheduleSocialDogNoticeUpdate();
+    }
+  }
+
+  function updateSocialDogOwnUserFromUrl(url) {
+    const ownUserId = extractSocialDogLoginServiceUserIdFromUrl(url);
+    if (!ownUserId || ownUserId === socialDogOwnServiceUserId) {
+      return false;
+    }
+    socialDogOwnServiceUserId = ownUserId;
+    return recomputeAllSocialDogReplyKinds();
+  }
+
+  function extractSocialDogLoginServiceUserIdFromUrl(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      return normalizeStatusId(parsed.searchParams.get("login_service_user_id") || "");
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function updateSocialDogUsersFromPayload(payload) {
+    const users = Array.isArray(payload.users) ? payload.users : [];
+    let updated = false;
+    for (const user of users) {
+      if (!user || typeof user !== "object") {
+        continue;
+      }
+      const tweetId = normalizeStatusId(user.tweet_id);
+      if (!tweetId) {
+        continue;
+      }
+      const itemType = typeof user.type === "string" ? user.type : "";
+      const tweetText = typeof user.tweet_text === "string" ? user.tweet_text : "";
+      if (itemType === "mention" && tweetText) {
+        if (registerSocialDogOwnScreenNameFromText(tweetText)) {
+          updated = true;
+        }
+      }
+
+      const parentId = normalizeStatusId(user.in_reply_to_status_id);
+      const myReplyTweetId = normalizeStatusId(user.user_replied_tweet_id);
+      if (itemType === "mention" && parentId && !socialDogParentOwnerByTweetId.has(parentId)) {
+        socialDogParentLookupPending.add(parentId);
+      }
+
+      const kind = deriveSocialDogReplyKind(itemType, parentId, myReplyTweetId);
+      const next = {
+        itemType,
+        parentId,
+        myReplyTweetId,
+        kind
+      };
+
+      const previous = socialDogReplyInfoByTweetId.get(tweetId);
+      if (
+        !previous ||
+        previous.itemType !== next.itemType ||
+        previous.parentId !== next.parentId ||
+        previous.myReplyTweetId !== next.myReplyTweetId ||
+        previous.kind !== next.kind
+      ) {
+        socialDogReplyInfoByTweetId.set(tweetId, next);
+        updated = true;
+      }
+    }
+
+    if (socialDogParentLookupPending.size > 0) {
+      runSocialDogParentLookups();
+    }
+
+    return updated;
+  }
+
+  function updateSocialDogMentionsFromPayload(payload) {
+    const tweets = Array.isArray(payload.tweets) ? payload.tweets : [];
+    let updated = false;
+    for (const tweet of tweets) {
+      if (!tweet || typeof tweet !== "object") {
+        continue;
+      }
+      if (tweet.type !== "mention_from_me") {
+        continue;
+      }
+      const tweetId = normalizeStatusId(tweet.tweet_id);
+      if (!tweetId || socialDogMentionFromMeTweetIds.has(tweetId)) {
+        continue;
+      }
+      socialDogMentionFromMeTweetIds.add(tweetId);
+      updated = true;
+    }
+
+    if (updated && recomputeAllSocialDogReplyKinds()) {
+      return true;
+    }
+    return updated;
+  }
+
+  function deriveSocialDogReplyKind(itemType, parentId, myReplyTweetId) {
+    if (itemType !== "mention" || !parentId) {
+      return "";
+    }
+
+    // Strong signal: this mention replied directly to my reply tweet.
+    if (myReplyTweetId && parentId === myReplyTweetId) {
+      return "reply_to_my_reply";
+    }
+    if (socialDogMentionFromMeTweetIds.has(parentId)) {
+      return "reply_to_my_reply";
+    }
+
+    const parentOwner = socialDogParentOwnerByTweetId.get(parentId);
+    const parentOwnerUserId = getSocialDogParentOwnerUserId(parentOwner);
+    const parentInReplyToUserId = getSocialDogParentInReplyToUserId(parentOwner);
+    if (parentOwnerUserId && socialDogOwnServiceUserId) {
+      if (parentOwnerUserId !== socialDogOwnServiceUserId) {
+        return "reply_to_my_reply";
+      }
+      // My tweet can still be a reply to another user's post.
+      if (parentInReplyToUserId && parentInReplyToUserId !== socialDogOwnServiceUserId) {
+        return "reply_to_my_reply";
+      }
+      return "reply_to_my_tweet";
+    }
+
+    const parentOwnerScreenName = getSocialDogParentOwnerScreenName(parentOwner);
+    const parentInReplyToScreenName = getSocialDogParentInReplyToScreenName(parentOwner);
+    if (parentOwnerScreenName && socialDogOwnScreenName) {
+      if (parentOwnerScreenName !== socialDogOwnScreenName) {
+        return "reply_to_my_reply";
+      }
+      if (parentInReplyToScreenName && parentInReplyToScreenName !== socialDogOwnScreenName) {
+        return "reply_to_my_reply";
+      }
+      return "reply_to_my_tweet";
+    }
+
+    // Parent metadata is unresolved: avoid wrong badges until lookup finishes.
+    return "";
+  }
+
+  function getSocialDogParentOwnerUserId(parentOwner) {
+    if (!parentOwner || typeof parentOwner !== "object") {
+      return "";
+    }
+    const id = parentOwner.userId;
+    return typeof id === "string" ? id : "";
+  }
+
+  function getSocialDogParentOwnerScreenName(parentOwner) {
+    if (!parentOwner) {
+      return "";
+    }
+    if (typeof parentOwner === "string") {
+      return parentOwner;
+    }
+    if (typeof parentOwner === "object" && typeof parentOwner.screenName === "string") {
+      return parentOwner.screenName;
+    }
+    return "";
+  }
+
+  function getSocialDogParentInReplyToUserId(parentOwner) {
+    if (!parentOwner || typeof parentOwner !== "object") {
+      return "";
+    }
+    const id = parentOwner.inReplyToUserId;
+    return typeof id === "string" ? id : "";
+  }
+
+  function getSocialDogParentInReplyToScreenName(parentOwner) {
+    if (!parentOwner || typeof parentOwner !== "object") {
+      return "";
+    }
+    const screenName = parentOwner.inReplyToScreenName;
+    return typeof screenName === "string" ? screenName : "";
+  }
+
+  function registerSocialDogOwnScreenNameFromText(tweetText) {
+    const handle = extractLeadingMentionHandle(tweetText);
+    if (!handle) {
+      return false;
+    }
+
+    const previousCount = socialDogOwnHandleCounts.get(handle) || 0;
+    socialDogOwnHandleCounts.set(handle, previousCount + 1);
+
+    let bestHandle = "";
+    let bestCount = 0;
+    for (const [candidate, count] of socialDogOwnHandleCounts.entries()) {
+      if (count > bestCount) {
+        bestHandle = candidate;
+        bestCount = count;
+      }
+    }
+
+    if (!bestHandle || bestHandle === socialDogOwnScreenName) {
+      return false;
+    }
+    socialDogOwnScreenName = bestHandle;
+    return recomputeAllSocialDogReplyKinds();
+  }
+
+  function extractLeadingMentionHandle(text) {
+    const match = /^\s*@([A-Za-z0-9_]{1,15})\b/.exec(text);
+    if (!match) {
+      return "";
+    }
+    return match[1].toLowerCase();
+  }
+
+  function recomputeAllSocialDogReplyKinds() {
+    let updated = false;
+    for (const [tweetId, info] of socialDogReplyInfoByTweetId.entries()) {
+      const nextKind = deriveSocialDogReplyKind(info.itemType, info.parentId, info.myReplyTweetId);
+      if (info.kind === nextKind) {
+        continue;
+      }
+      socialDogReplyInfoByTweetId.set(tweetId, {
+        ...info,
+        kind: nextKind
+      });
+      updated = true;
+    }
+    return updated;
+  }
+
+  async function runSocialDogParentLookups() {
+    if (socialDogParentLookupRunning || socialDogParentLookupPending.size === 0) {
+      return;
+    }
+    socialDogParentLookupRunning = true;
+    try {
+      while (socialDogParentLookupPending.size > 0) {
+        const parentId = socialDogParentLookupPending.values().next().value;
+        socialDogParentLookupPending.delete(parentId);
+        const owner = await fetchSocialDogTweetOwner(parentId);
+        if (owner !== null) {
+          socialDogParentOwnerByTweetId.set(parentId, owner);
+        } else {
+          // Mark as resolved to avoid endless retries for unavailable/deleted tweets.
+          socialDogParentOwnerByTweetId.set(parentId, {
+            userId: "",
+            screenName: "",
+            inReplyToUserId: "",
+            inReplyToScreenName: ""
+          });
+        }
+      }
+
+      if (recomputeAllSocialDogReplyKinds()) {
+        scheduleSocialDogNoticeUpdate();
+      }
+    } finally {
+      socialDogParentLookupRunning = false;
+      if (socialDogParentLookupPending.size > 0) {
+        runSocialDogParentLookups();
+      }
+    }
+  }
+
+  async function fetchSocialDogTweetOwner(tweetId) {
+    const ownerViaBackground = await fetchSocialDogTweetOwnerViaBackground(tweetId);
+    if (ownerViaBackground !== undefined) {
+      return ownerViaBackground;
+    }
+
+    const endpoint = `https://cdn.syndication.twimg.com/tweet-result?id=${encodeURIComponent(tweetId)}&token=0`;
+    try {
+      const response = await fetch(endpoint, {
+        method: "GET",
+        credentials: "omit"
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const json = await response.json();
+      return parseSocialDogTweetOwnerFromResult(json);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async function fetchSocialDogTweetOwnerViaBackground(tweetId) {
+    if (!chrome || !chrome.runtime || typeof chrome.runtime.sendMessage !== "function") {
+      return undefined;
+    }
+
+    try {
+      const response = await new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          {
+            type: "socialcat:fetch-socialdog-tweet-owner",
+            tweetId
+          },
+          (result) => {
+            if (chrome.runtime.lastError) {
+              resolve({
+                ok: false,
+                noReceiver: true
+              });
+              return;
+            }
+            resolve(result);
+          }
+        );
+      });
+
+      if (!response || typeof response !== "object") {
+        return null;
+      }
+      if (response.noReceiver) {
+        // Background is not available: fall back to page-context fetch.
+        return undefined;
+      }
+      if (response.ok !== true) {
+        return null;
+      }
+      const owner = parseSocialDogTweetOwnerFromResult(response.owner);
+      return owner;
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  function parseSocialDogTweetOwnerFromResult(json) {
+    if (!json || typeof json !== "object") {
+      return null;
+    }
+    const user = json.user && typeof json.user === "object" ? json.user : null;
+    const normalizedScreenNameFromRaw =
+      user && typeof user.screen_name === "string"
+        ? user.screen_name.toLowerCase()
+        : "";
+    const normalizedUserIdFromRaw = normalizeStatusId(user && user.id_str ? user.id_str : "");
+    const normalizedReplyToUserIdFromRaw = normalizeStatusId(json.in_reply_to_user_id_str || "");
+    const normalizedReplyToScreenNameFromRaw =
+      typeof json.in_reply_to_screen_name === "string"
+        ? json.in_reply_to_screen_name.toLowerCase()
+        : "";
+
+    // Background response can already be normalized to these keys.
+    const normalizedScreenNameFromNormalized =
+      typeof json.screenName === "string" ? json.screenName.toLowerCase() : "";
+    const normalizedUserIdFromNormalized = normalizeStatusId(json.userId || "");
+    const normalizedReplyToUserIdFromNormalized = normalizeStatusId(json.inReplyToUserId || "");
+    const normalizedReplyToScreenNameFromNormalized =
+      typeof json.inReplyToScreenName === "string"
+        ? json.inReplyToScreenName.toLowerCase()
+        : "";
+
+    const screenName = normalizedScreenNameFromNormalized || normalizedScreenNameFromRaw;
+    const userId = normalizedUserIdFromNormalized || normalizedUserIdFromRaw;
+    const inReplyToUserId =
+      normalizedReplyToUserIdFromNormalized || normalizedReplyToUserIdFromRaw;
+    const inReplyToScreenName =
+      normalizedReplyToScreenNameFromNormalized || normalizedReplyToScreenNameFromRaw;
+    if (!screenName && !userId && !inReplyToUserId && !inReplyToScreenName) {
+      return null;
+    }
+    return {
+      userId,
+      screenName,
+      inReplyToUserId,
+      inReplyToScreenName
+    };
+  }
+
+  function normalizeStatusId(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(Math.trunc(value));
+    }
+    if (typeof value !== "string") {
+      return "";
+    }
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return "";
+    }
+    return trimmed;
+  }
+
+  function observeSocialDogTimeline() {
+    if (socialDogTimelineObserver || !document.documentElement) {
+      return;
+    }
+    socialDogTimelineObserver = new MutationObserver(() => {
+      scheduleSocialDogNoticeUpdate();
+    });
+    socialDogTimelineObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  function scheduleSocialDogNoticeUpdate() {
+    if (socialDogNoticeTimer !== null) {
+      return;
+    }
+    socialDogNoticeTimer = window.setTimeout(() => {
+      socialDogNoticeTimer = null;
+      applySocialDogReplyNotices();
+    }, 120);
   }
 
   function installRouteWatcher() {
@@ -126,10 +673,22 @@
         return;
       }
       applyRetweetCollapse();
+      applyXReplyNotices();
     };
 
     window.addEventListener("popstate", onRouteMaybeChanged, true);
     window.addEventListener("hashchange", onRouteMaybeChanged, true);
+    window.addEventListener("pageshow", onRouteMaybeChanged, true);
+
+    // X can navigate via the Navigation API without using History API hooks.
+    const nav = window.navigation;
+    if (nav && typeof nav.addEventListener === "function") {
+      try {
+        nav.addEventListener("currententrychange", onRouteMaybeChanged);
+      } catch (_) {
+        // Ignore unsupported/locked-down environments and keep other watchers.
+      }
+    }
 
     const originalPushState = history.pushState;
     history.pushState = function pushStatePatched() {
@@ -144,6 +703,11 @@
       onRouteMaybeChanged();
       return result;
     };
+
+    // Fallback in case the page overwrites history hooks after our patch.
+    if (routeWatchFallbackTimer === null) {
+      routeWatchFallbackTimer = window.setInterval(onRouteMaybeChanged, 500);
+    }
   }
 
   function onStorageChanged(changes, areaName) {
@@ -152,6 +716,7 @@
     }
     settings = normalizeSettings(changes[STORAGE_KEY].newValue);
     applyRetweetCollapse();
+    applyXReplyNotices();
   }
 
   function onKeyDown(event) {
@@ -227,6 +792,7 @@
     if (!editor) {
       return;
     }
+    syncGreetingHighlight(editor);
     maybeInsertGreeting(editor);
   }
 
@@ -281,14 +847,46 @@
       return;
     }
 
-    const message = pickGreetingForNow(settings.greeting.ranges, new Date());
+    const now = new Date();
+    const message = pickGreetingForNow(settings.greeting.ranges, now);
     if (!message) {
+      return;
+    }
+    if (!shouldAutoInsertMorningGreeting(editor, message, now)) {
       return;
     }
 
     insertTextIntoEditor(editor, message);
     editor.dataset[AUTO_INSERT_DATA_KEY] = "1";
     editor.dataset[AUTO_INSERT_VALUE_KEY] = message;
+    applyGreetingHighlight(editor);
+  }
+
+  function shouldAutoInsertMorningGreeting(editor, message, now) {
+    if (!isMorningTime(now)) {
+      return false;
+    }
+    if (!isOhatsuMessage(message)) {
+      return false;
+    }
+
+    const submitButton = findSubmitButton(editor);
+    if (!submitButton) {
+      return false;
+    }
+    return detectComposerType(editor, submitButton) === "post";
+  }
+
+  function isMorningTime(now) {
+    const nowMinutes = now.getHours() * 60 + now.getMinutes();
+    return nowMinutes >= MORNING_START_MINUTES && nowMinutes < MORNING_END_MINUTES;
+  }
+
+  function isOhatsuMessage(message) {
+    if (typeof message !== "string") {
+      return false;
+    }
+    return OHATSU_TEXT_PATTERN.test(message.trim());
   }
 
   function maybeAutoLikeOnReply(editor, submitButton) {
@@ -482,7 +1080,7 @@
   }
 
   function getRouteKey() {
-    return `${location.pathname}|${location.search}`;
+    return `${location.pathname}|${location.search}|${location.hash}`;
   }
 
   function isStatusDetailPage() {
@@ -549,6 +1147,22 @@
       }
       [${RETWEET_TOGGLE_HOST_ATTRIBUTE}="1"][${RETWEET_TOGGLE_STATE_ATTRIBUTE}="expanded"]::after {
         content: "\\25B2";
+      }
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function ensureGreetingStyles() {
+    if (document.getElementById(GREETING_STYLE_ID)) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.id = GREETING_STYLE_ID;
+    style.textContent = `
+      .${GREETING_HIGHLIGHT_CLASS} {
+        border: 1px solid #86efac !important;
+        box-shadow: 0 0 0 2px rgba(187, 247, 208, 0.9) !important;
+        border-radius: 10px !important;
       }
     `;
     document.documentElement.appendChild(style);
@@ -863,6 +1477,499 @@
     return null;
   }
 
+  function applySocialDogReplyNotices() {
+    const anchors = document.querySelectorAll(
+      [
+        '.user_list_sidebar_user_timeline_time a[href*="/status/"]',
+        '.sc-bnMgcM.bFqtzZ a[href*="/status/"]'
+      ].join(",")
+    );
+    const activeContainers = new Set();
+
+    for (const anchor of anchors) {
+      if (!(anchor instanceof HTMLAnchorElement)) {
+        continue;
+      }
+
+      const tweetId = extractStatusIdFromHref(anchor.getAttribute("href") || "");
+      if (!tweetId) {
+        continue;
+      }
+
+      const container = findSocialDogNoticeContainer(anchor);
+      if (!container) {
+        continue;
+      }
+      activeContainers.add(container);
+
+      const replyInfo = socialDogReplyInfoByTweetId.get(tweetId);
+      if (!replyInfo || !replyInfo.parentId || !replyInfo.kind) {
+        removeSocialDogReplyNotice(container);
+        continue;
+      }
+
+      const isMatched = replyInfo.kind === "reply_to_my_reply";
+      upsertSocialDogReplyNotice(container, isMatched);
+    }
+
+    const allNotices = document.querySelectorAll(`[${SOCIAL_DOG_NOTICE_ATTRIBUTE}="1"]`);
+    for (const notice of allNotices) {
+      if (!(notice instanceof HTMLElement)) {
+        continue;
+      }
+      const container = notice.parentElement;
+      if (!(container instanceof HTMLElement)) {
+        continue;
+      }
+      if (activeContainers.has(container)) {
+        continue;
+      }
+      removeSocialDogReplyNotice(container);
+    }
+  }
+
+  function findSocialDogNoticeContainer(anchor) {
+    const timeWrap = anchor.closest(".user_list_sidebar_user_timeline_time");
+    if (timeWrap instanceof HTMLElement && timeWrap.parentElement instanceof HTMLElement) {
+      return timeWrap.parentElement;
+    }
+
+    const compactContainer = anchor.closest(".sc-bnMgcM.bFqtzZ");
+    if (compactContainer instanceof HTMLElement) {
+      return compactContainer;
+    }
+
+    return anchor.parentElement instanceof HTMLElement ? anchor.parentElement : null;
+  }
+
+  function upsertSocialDogReplyNotice(container, isMatched) {
+    let notice = container.querySelector(".my_reply_notice");
+    if (!(notice instanceof HTMLElement)) {
+      notice = document.createElement("div");
+      const existingNotice = container.querySelector(".friendship_update_message:not(.my_reply_notice)");
+      if (existingNotice instanceof HTMLElement) {
+        notice.className = `${existingNotice.className} my_reply_notice`;
+      } else {
+        notice.className = "friendship_update_message my_reply_notice";
+      }
+    }
+
+    notice.setAttribute("color", "warning");
+    notice.setAttribute(SOCIAL_DOG_NOTICE_ATTRIBUTE, "1");
+    const noticeBackground = isMatched ? "#16a34a" : "#2563eb";
+    const noticeBorder = isMatched ? "#15803d" : "#1d4ed8";
+    notice.style.background = noticeBackground;
+    notice.style.color = "white";
+    notice.style.border = `1px solid ${noticeBorder}`;
+    notice.style.borderRadius = "999px";
+    notice.style.padding = "4px 10px";
+    notice.style.fontWeight = "700";
+    notice.style.display = "inline-block";
+    notice.style.maxWidth = "100%";
+    notice.style.minWidth = "0";
+    notice.style.boxSizing = "border-box";
+    notice.style.whiteSpace = "normal";
+    notice.style.overflowWrap = "anywhere";
+    notice.style.wordBreak = "break-word";
+    notice.style.lineHeight = "1.35";
+    notice.style.flexShrink = "1";
+    notice.textContent = isMatched
+      ? "\u30ea\u30d7\u306b\u8fd4\u4fe1\u3055\u308c\u307e\u3057\u305f"
+      : "\u30ea\u30d7\u30e9\u30a4\u304c\u5c4a\u304d\u307e\u3057\u305f";
+
+    if (container.matches(".sc-bnMgcM.bFqtzZ")) {
+      container.style.flexWrap = "wrap";
+      container.style.rowGap = "6px";
+      container.style.columnGap = "8px";
+    }
+
+    const timeWrap = container.querySelector(".user_list_sidebar_user_timeline_time");
+    if (timeWrap instanceof HTMLElement) {
+      container.insertBefore(notice, timeWrap);
+      return;
+    }
+    const statusLink = container.querySelector('a[href*="/status/"]');
+    if (statusLink instanceof HTMLElement) {
+      container.insertBefore(notice, statusLink);
+      return;
+    }
+    if (!container.contains(notice)) {
+      container.insertBefore(notice, container.firstChild);
+    }
+  }
+
+  function removeSocialDogReplyNotice(container) {
+    const notices = container.querySelectorAll(".my_reply_notice");
+    for (const notice of notices) {
+      if (!(notice instanceof HTMLElement)) {
+        continue;
+      }
+      if (notice.getAttribute(SOCIAL_DOG_NOTICE_ATTRIBUTE) !== "1") {
+        continue;
+      }
+      notice.remove();
+    }
+  }
+
+  function applyXReplyNotices() {
+    if (shouldApplyXReplyNoticesOnCurrentPage()) {
+      ensureXReplyNoticeStyles();
+      runXReplyNotices();
+      if (!xReplyNoticeObserver && document.documentElement) {
+        xReplyNoticeObserver = new MutationObserver(() => {
+          if (!shouldApplyXReplyNoticesOnCurrentPage()) {
+            applyXReplyNotices();
+            return;
+          }
+          scheduleXReplyNoticeUpdate();
+        });
+        xReplyNoticeObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true
+        });
+      }
+      return;
+    }
+
+    if (xReplyNoticeObserver) {
+      xReplyNoticeObserver.disconnect();
+      xReplyNoticeObserver = null;
+    }
+    if (xReplyNoticeTimer !== null) {
+      window.clearTimeout(xReplyNoticeTimer);
+      xReplyNoticeTimer = null;
+    }
+    clearXReplyNotices();
+  }
+
+  function shouldApplyXReplyNoticesOnCurrentPage() {
+    const path = trimTrailingSlash(location.pathname.toLowerCase());
+    return path === "/notifications" || path.startsWith("/notifications/");
+  }
+
+  function scheduleXReplyNoticeUpdate() {
+    if (xReplyNoticeTimer !== null) {
+      return;
+    }
+    xReplyNoticeTimer = window.setTimeout(() => {
+      xReplyNoticeTimer = null;
+      runXReplyNotices();
+    }, 160);
+  }
+
+  function runXReplyNotices() {
+    if (!shouldApplyXReplyNoticesOnCurrentPage()) {
+      clearXReplyNotices();
+      return;
+    }
+
+    const cells = document.querySelectorAll(X_NOTIFICATION_CELL_SELECTOR);
+    const activeContainers = new Set();
+    for (const cell of cells) {
+      if (!(cell instanceof HTMLElement)) {
+        continue;
+      }
+
+      const container = findXReplyNoticeContainer(cell);
+      if (!container) {
+        continue;
+      }
+      activeContainers.add(container);
+
+      const kind = detectXReplyKindFromCell(cell);
+      if (!kind) {
+        removeXReplyNotice(container);
+        continue;
+      }
+      upsertXReplyNotice(container, kind);
+    }
+
+    const notices = document.querySelectorAll(`[${X_REPLY_NOTICE_ATTRIBUTE}="1"]`);
+    for (const notice of notices) {
+      if (!(notice instanceof HTMLElement)) {
+        continue;
+      }
+      const container = notice.parentElement;
+      if (!(container instanceof HTMLElement)) {
+        continue;
+      }
+      if (activeContainers.has(container)) {
+        continue;
+      }
+      notice.remove();
+    }
+  }
+
+  function detectXReplyKindFromText(text) {
+    if (typeof text !== "string") {
+      return "";
+    }
+    const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+    if (!normalized) {
+      return "";
+    }
+    if (X_NON_REPLY_ACTION_PATTERN.test(normalized)) {
+      return "";
+    }
+    if (!X_REPLY_VERB_PATTERN.test(normalized)) {
+      return "";
+    }
+    if (X_REPLY_TO_REPLY_PATTERN.test(normalized)) {
+      return "reply_to_my_reply";
+    }
+    if (X_REPLY_TO_POST_PATTERN.test(normalized)) {
+      return "reply_to_my_tweet";
+    }
+    if (/\u3042\u306a\u305f\u306e(?:\u8fd4\u4fe1|\u30dd\u30b9\u30c8|\u30c4\u30a4\u30fc\u30c8)|\u3042\u306a\u305f\u306b|your (?:reply|post)|to you/.test(normalized)) {
+      return "reply_to_my_tweet";
+    }
+    return "";
+  }
+
+  function detectXReplyKindFromCell(cell) {
+    if (!(cell instanceof HTMLElement)) {
+      return "";
+    }
+
+    const notificationArticle = cell.querySelector(X_NOTIFICATION_ARTICLE_SELECTOR);
+    if (notificationArticle instanceof HTMLElement) {
+      return detectXReplyKindFromText(notificationArticle.textContent || "");
+    }
+
+    const tweetArticle = cell.querySelector(TWEET_ARTICLE_SELECTOR);
+    if (tweetArticle instanceof HTMLElement) {
+      return detectXReplyKindFromTweetArticle(tweetArticle);
+    }
+
+    return detectXReplyKindFromText(cell.textContent || "");
+  }
+
+  function detectXReplyKindFromTweetArticle(article) {
+    if (!(article instanceof HTMLElement)) {
+      return "";
+    }
+
+    const text = article.textContent || "";
+    if (!text || !X_REPLYING_TO_PATTERN.test(text)) {
+      return "";
+    }
+
+    const tweetId = getStatusIdFromTweetArticle(article);
+    if (!tweetId) {
+      return "";
+    }
+
+    if (xReplyKindByTweetId.has(tweetId)) {
+      return xReplyKindByTweetId.get(tweetId) || "";
+    }
+
+    queueXReplyKindLookup(tweetId);
+    return "";
+  }
+
+  function getStatusIdFromTweetArticle(article) {
+    if (!(article instanceof HTMLElement)) {
+      return "";
+    }
+
+    const primaryStatusLink = article.querySelector('a[href*="/status/"] time');
+    if (primaryStatusLink instanceof Element) {
+      const anchor = primaryStatusLink.closest("a");
+      if (anchor instanceof HTMLAnchorElement) {
+        const primaryId = extractStatusIdFromHref(anchor.getAttribute("href") || "");
+        if (primaryId) {
+          return primaryId;
+        }
+      }
+    }
+
+    const links = article.querySelectorAll('a[href*="/status/"]');
+    for (const link of links) {
+      if (!(link instanceof HTMLAnchorElement)) {
+        continue;
+      }
+      const id = extractStatusIdFromHref(link.getAttribute("href") || "");
+      if (id) {
+        return id;
+      }
+    }
+    return "";
+  }
+
+  function queueXReplyKindLookup(tweetId) {
+    if (!tweetId || xReplyKindByTweetId.has(tweetId)) {
+      return;
+    }
+    xReplyLookupPending.add(tweetId);
+    runXReplyKindLookups();
+  }
+
+  async function runXReplyKindLookups() {
+    if (xReplyLookupRunning) {
+      return;
+    }
+    xReplyLookupRunning = true;
+    try {
+      while (xReplyLookupPending.size > 0) {
+        const tweetId = xReplyLookupPending.values().next().value;
+        xReplyLookupPending.delete(tweetId);
+        const kind = await resolveXReplyKindFromTweetId(tweetId);
+        xReplyKindByTweetId.set(tweetId, kind || "");
+      }
+    } finally {
+      xReplyLookupRunning = false;
+    }
+    scheduleXReplyNoticeUpdate();
+  }
+
+  async function resolveXReplyKindFromTweetId(tweetId) {
+    const result = await fetchXTweetResult(tweetId);
+    return deriveXReplyKindFromTweetResult(result);
+  }
+
+  async function fetchXTweetResult(tweetId) {
+    const endpoint = `${X_TWEET_RESULT_BASE}?id=${encodeURIComponent(tweetId)}&token=0`;
+    try {
+      const response = await fetch(endpoint, {
+        method: "GET",
+        credentials: "omit"
+      });
+      if (!response.ok) {
+        return null;
+      }
+      return await response.json();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function deriveXReplyKindFromTweetResult(result) {
+    if (!result || typeof result !== "object") {
+      return "";
+    }
+
+    const inReplyToStatusId = normalizeStatusId(result.in_reply_to_status_id_str || "");
+    if (!inReplyToStatusId) {
+      return "";
+    }
+
+    const parent = result.parent && typeof result.parent === "object" ? result.parent : null;
+    if (!parent) {
+      return "reply_to_my_tweet";
+    }
+
+    const inReplyToUserId = normalizeStatusId(result.in_reply_to_user_id_str || "");
+    const parentUser =
+      parent.user && typeof parent.user === "object" ? parent.user : null;
+    const parentUserId = normalizeStatusId(parentUser && parentUser.id_str ? parentUser.id_str : "");
+    const parentInReplyToStatusId = normalizeStatusId(parent.in_reply_to_status_id_str || "");
+
+    if (inReplyToUserId && parentUserId && inReplyToUserId === parentUserId) {
+      return parentInReplyToStatusId ? "reply_to_my_reply" : "reply_to_my_tweet";
+    }
+
+    if (parentInReplyToStatusId) {
+      return "reply_to_my_reply";
+    }
+    return "reply_to_my_tweet";
+  }
+
+  function findXReplyNoticeContainer(cell) {
+    if (!(cell instanceof HTMLElement)) {
+      return null;
+    }
+    const tweetPlacement = cell.querySelector('div[data-testid="tweet"]');
+    if (tweetPlacement instanceof HTMLElement) {
+      return tweetPlacement;
+    }
+    const article = cell.querySelector(TWEET_ARTICLE_SELECTOR);
+    if (article instanceof HTMLElement) {
+      const placement = article.closest('div[data-testid="tweet"]');
+      if (placement instanceof HTMLElement) {
+        return placement;
+      }
+    }
+    return cell;
+  }
+
+  function upsertXReplyNotice(container, kind) {
+    let notice = container.querySelector(`.${X_REPLY_NOTICE_CLASS}`);
+    if (!(notice instanceof HTMLElement)) {
+      notice = document.createElement("div");
+      notice.className = X_REPLY_NOTICE_CLASS;
+    }
+
+    notice.setAttribute(X_REPLY_NOTICE_ATTRIBUTE, "1");
+    notice.setAttribute(X_REPLY_NOTICE_KIND_ATTRIBUTE, kind);
+    notice.textContent =
+      kind === "reply_to_my_reply"
+        ? "\u30ea\u30d7\u306b\u8fd4\u4fe1\u3055\u308c\u307e\u3057\u305f"
+        : "\u30ea\u30d7\u30e9\u30a4\u304c\u5c4a\u304d\u307e\u3057\u305f";
+
+    if (!container.contains(notice)) {
+      container.insertBefore(notice, container.firstChild);
+    }
+  }
+
+  function removeXReplyNotice(container) {
+    const notices = container.querySelectorAll(`.${X_REPLY_NOTICE_CLASS}`);
+    for (const notice of notices) {
+      if (!(notice instanceof HTMLElement)) {
+        continue;
+      }
+      if (notice.getAttribute(X_REPLY_NOTICE_ATTRIBUTE) !== "1") {
+        continue;
+      }
+      notice.remove();
+    }
+  }
+
+  function clearXReplyNotices() {
+    const notices = document.querySelectorAll(`[${X_REPLY_NOTICE_ATTRIBUTE}="1"]`);
+    for (const notice of notices) {
+      if (notice instanceof HTMLElement) {
+        notice.remove();
+      }
+    }
+  }
+
+  function ensureXReplyNoticeStyles() {
+    if (document.getElementById(X_REPLY_NOTICE_STYLE_ID)) {
+      return;
+    }
+    const style = document.createElement("style");
+    style.id = X_REPLY_NOTICE_STYLE_ID;
+    style.textContent = `
+      .${X_REPLY_NOTICE_CLASS} {
+        display: inline-block;
+        margin: 4px 0 8px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.35;
+        color: #fff;
+        max-width: 100%;
+        box-sizing: border-box;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .${X_REPLY_NOTICE_CLASS}[${X_REPLY_NOTICE_KIND_ATTRIBUTE}="reply_to_my_reply"] {
+        background: #16a34a;
+        border: 1px solid #15803d;
+      }
+      .${X_REPLY_NOTICE_CLASS}[${X_REPLY_NOTICE_KIND_ATTRIBUTE}="reply_to_my_tweet"] {
+        background: #2563eb;
+        border: 1px solid #1d4ed8;
+      }
+    `;
+    const parent = document.head || document.documentElement;
+    if (!parent) {
+      return;
+    }
+    parent.appendChild(style);
+  }
+
   function getRetweetContentKey(article) {
     const primaryStatusLink = article.querySelector('a[href*="/status/"] time');
     if (primaryStatusLink instanceof Element) {
@@ -1086,6 +2193,30 @@
   function clearAutoInsertState(editor) {
     delete editor.dataset[AUTO_INSERT_DATA_KEY];
     delete editor.dataset[AUTO_INSERT_VALUE_KEY];
+    clearGreetingHighlight(editor);
+  }
+
+  function applyGreetingHighlight(editor) {
+    editor.classList.add(GREETING_HIGHLIGHT_CLASS);
+  }
+
+  function clearGreetingHighlight(editor) {
+    editor.classList.remove(GREETING_HIGHLIGHT_CLASS);
+  }
+
+  function syncGreetingHighlight(editor) {
+    if (editor.dataset[AUTO_INSERT_DATA_KEY] !== "1") {
+      clearGreetingHighlight(editor);
+      return;
+    }
+
+    const autoInsertedValue = editor.dataset[AUTO_INSERT_VALUE_KEY] || "";
+    if (!isAutoInsertedTextStillPresent(editor, autoInsertedValue)) {
+      clearAutoInsertState(editor);
+      return;
+    }
+
+    applyGreetingHighlight(editor);
   }
 
   function isManualInsertionInput(event) {
