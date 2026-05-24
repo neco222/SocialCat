@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SocialCat 設定</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="wrapper">
+      <h1>SocialCat</h1>
+
+      <section class="card">
+        <h2>機能トグル</h2>
+        <label class="row">
+          <input id="enableReplyEnterSend" type="checkbox">
+          <span>返信は Enter で送信（デフォルトON）</span>
+        </label>
+        <label class="row">
+          <input id="enablePostEnterSend" type="checkbox">
+          <span>通常投稿も Enter で送信（デフォルトOFF）</span>
+        </label>
+        <label class="row">
+          <input id="autoOpenReplyAfterLike" type="checkbox">
+          <span>いいね時に自動でリプ欄を開く（デフォルトOFF）</span>
+        </label>
+        <label class="row">
+          <input id="collapseRetweets" type="checkbox">
+          <span>リポストを折りたたむ（デフォルトON）</span>
+        </label>
+        <label class="row">
+          <input id="autoLikeOnReply" type="checkbox">
+          <span>リプ送信時に自動いいね（デフォルトOFF）</span>
+        </label>
+        <p class="note">Shift + Enter は改行です。</p>
+      </section>
+
+      <section class="card">
+        <h2>自動おはよう挿入</h2>
+        <label class="row">
+          <input id="greetingEnabled" type="checkbox">
+          <span>機能を有効にする</span>
+        </label>
+        <p class="note">時間帯に一致し、入力欄が空のときに挨拶を挿入します。</p>
+        <div id="ranges"></div>
+        <button id="addRange" type="button" class="secondary">時間帯を追加</button>
+      </section>
+
+      <section class="footer">
+        <button id="save" type="button" class="primary">保存</button>
+        <p id="status" class="status" aria-live="polite"></p>
+      </section>
+    </main>
+
+    <template id="rangeTemplate">
+      <article class="range-item">
+        <div class="range-head">
+          <strong>時間帯</strong>
+          <button type="button" class="danger delete-range">削除</button>
+        </div>
+        <div class="grid">
+          <label>
+            開始
+            <input class="start-time" type="time" value="05:00">
+          </label>
+          <label>
+            終了
+            <input class="end-time" type="time" value="12:00">
+          </label>
+        </div>
+        <label class="row">
+          <input class="range-enabled" type="checkbox" checked>
+          <span>この時間帯を有効にする</span>
+        </label>
+        <label>
+          挿入メッセージ（1行1候補）
+          <textarea class="messages" rows="4" placeholder="おはようございます&#10;今日もよろしくお願いします"></textarea>
+        </label>
+        <label class="row">
+          <input class="range-random" type="checkbox">
+          <span>ランダムで1件選ぶ</span>
+        </label>
+      </article>
+    </template>
+
+    <script src="options.js"></script>
+  </body>
+</html>
